@@ -26,6 +26,15 @@ const Terminal = struct {
     cout: std.io.BufferedWriter(4096, std.fs.File.Writer),
     cin: std.io.BufferedReader(4096, std.fs.File.Reader),
 
+    pub fn hideCursor(self: *Terminal) !void {
+        const sw = self.cout.writer();
+        try sw.writeAll("\x1b[?25l");
+    }
+    pub fn showCursor(self: *Terminal) !void {
+        const sw = self.cout.writer();
+        try sw.writeAll("\x1b[?25h");
+    }
+
     pub fn getCursorPos(self: *Terminal) !Position {
         const sw = self.cout.writer();
         const sr = self.cin.reader();
@@ -53,6 +62,11 @@ const Terminal = struct {
         return Position{ .x = x, .y = y };
     }
 
+    pub fn navCurTo(self: *Terminal, pos: Position) !void {
+        const sw = self.cout.writer();
+        try sw.print("\x1b[{d};{d}H", .{ pos.y, pos.x });
+    }
+
     pub fn getSize(self: *Terminal) !Size {
         var ws: std.os.linux.winsize = undefined;
         const stdout = std.io.getStdOut();
@@ -78,13 +92,76 @@ const Terminal = struct {
         sw.writeAll(exit_alternate_screen_code) catch unreachable;
     }
 
-    pub fn readKey(self: *Terminal) !u8 {
+    pub fn readKey(self: *Terminal) !Key {
         const sr = self.cin.reader();
-        while (true) {
-            return sr.readByte() catch |err| switch (err) {
-                error.EndOfStream => continue,
-                else => return err,
-            };
+        const byte = blk: {
+            while (true) {
+                break :blk sr.readByte() catch |err| switch (err) {
+                    error.EndOfStream => continue,
+                    else => return err,
+                };
+            }
+        };
+        switch (byte) {
+            '\x1b' => {
+                const second_byte = sr.readByte() catch |err| {
+                    if (err == error.EndOfStream) return .{ .code = .{ .Escape = {} } };
+                    return err;
+                };
+                if (second_byte == '[') {
+                    const third_byte = sr.readByte() catch |err| {
+                        if (err == error.EndOfStream) return .{ .code = .{ .Escape = {} } };
+                        return err;
+                    };
+                    switch (third_byte) {
+                        'A' => return .{ .code = .{ .ArrowUp = {} } },
+                        'B' => return .{ .code = .{ .ArrowDown = {} } },
+                        'C' => return .{ .code = .{ .ArrowRight = {} } },
+                        'D' => return .{ .code = .{ .ArrowLeft = {} } },
+                        'H' => return .{ .code = .{ .Home = {} } },
+                        'F' => return .{ .code = .{ .End = {} } },
+                        '5' => {
+                            const fourth_byte = sr.readByte() catch |err| {
+                                if (err == error.EndOfStream) return .{ .code = .{ .Escape = {} } };
+                                return err;
+                            };
+                            if (fourth_byte == '~') {
+                                return .{ .code = .{ .PageUp = {} } };
+                            }
+                            return .{ .code = .{ .Escape = {} } };
+                        },
+                        '6' => {
+                            const fourth_byte = sr.readByte() catch |err| {
+                                if (err == error.EndOfStream) return .{ .code = .{ .Escape = {} } };
+                                return err;
+                            };
+                            if (fourth_byte == '~') {
+                                return .{ .code = .{ .PageDown = {} } };
+                            }
+                            return .{ .code = .{ .Escape = {} } };
+                        },
+                        else => return .{ .code = .{ .Escape = {} } },
+                    }
+                } else if (second_byte == 'O') {
+                    const third_byte = sr.readByte() catch |err| {
+                        if (err == error.EndOfStream) return .{ .code = .{ .Escape = {} } };
+                        return err;
+                    };
+                    switch (third_byte) {
+                        'H' => return .{ .code = .{ .Home = {} } },
+                        'F' => return .{ .code = .{ .End = {} } },
+                        else => return .{ .code = .{ .Escape = {} } },
+                    }
+                } else {
+                    return .{ .code = .{ .Escape = {} } };
+                }
+            },
+            127 => return .{ .code = .{ .Backspace = {} } },
+            10 => return .{ .code = .{ .Enter = {} } },
+            else => return .{
+                .code = .{ .Char = unaltKey(unctrlKey(byte)) },
+                .ctrl = std.ascii.isControl(byte),
+            },
         }
     }
 
@@ -132,56 +209,173 @@ const Terminal = struct {
 };
 
 pub fn assertTty() void {
-    if (!std.io.getStdOut().isTty()) {
+    if (!std.io.getStdOut().isTty() or !std.io.getStdIn().isTty()) {
         std.debug.print("This program is intended to be run interactively.\n", .{});
         std.os.exit(1);
     }
 }
 
+const Action = union(enum) {};
+
+const Cursor = struct {
+    line: usize,
+    col: usize,
+    // selection_len: ?usize = null,
+};
+
 const Editor = struct {
     term: Terminal,
+    lines: std.ArrayList(?std.ArrayListUnmanaged(u8)),
+    action_queue: std.fifo.LinearFifo(Action, .{ .Static = 4096 }),
+    cur_scroll: usize = 0,
+    cursors: std.ArrayList(Cursor),
 
     pub fn init(self: *Editor) !void {
         try self.term.initScreen();
+        try self.term.hideCursor();
         try self.term.enableRawMode();
         try self.term.clear();
+        try self.term.showCursor();
         try self.term.cout.flush();
+        try self.cursors.append(.{ .line = 0, .col = 0 });
     }
 
     pub fn deinit(self: *Editor) void {
         self.term.deinitScreen();
         self.term.disableRawMode();
     }
+
+    pub fn refreshScreen(self: *Editor) !void {
+        // try self.term.hideCursor();
+        try self.term.clear();
+        const size = try self.term.getSize();
+        for (0..size.height) |i| {
+            const sw = self.term.cout.writer();
+            // try sw.print("{d} ", .{i + 1});
+            try sw.writeAll("~ ");
+            const str_i = self.cur_scroll + i;
+            if (str_i < self.lines.items.len) {
+                if (self.lines.items[str_i]) |line| {
+                    const line_len = line.items.len;
+                    if (line_len > size.width) {
+                        const more_str = " ...";
+                        try sw.writeAll(line.items[0 .. size.width - more_str.len]);
+                        try sw.writeAll(more_str);
+                    } else {
+                        try sw.writeAll(line.items);
+                    }
+                }
+            }
+            if (i < size.height - 1) {
+                try sw.writeAll("\r\n");
+            }
+        }
+        for (self.cursors.items) |cursor| {
+            const sw = self.term.cout.writer();
+            try sw.print("\x1b[{d};{d}H", .{ cursor.line + 1, cursor.col + 1 });
+            // print white block
+            try sw.writeAll("\xe2\x96\x88");
+        }
+
+        try self.term.cout.flush();
+    }
+
+    pub fn moveCursors(self: *Editor, dx: isize, dy: isize) !void {
+        for (self.cursors.items) |cursor| {
+            const new_line = @as(isize, @intCast(cursor.line)) + dy;
+            new_line = @max(new_line, 0);
+            const new_col = @as(isize, @intCast(cursor.col)) + dx;
+            _ = new_col;
+        }
+    }
+};
+
+const KeyCode = union(enum) {
+    Escape: void,
+    Home: void,
+    End: void,
+    PageUp: void,
+    PageDown: void,
+    ArrowLeft: void,
+    ArrowRight: void,
+    ArrowUp: void,
+    ArrowDown: void,
+    Delete: void,
+    Backspace: void,
+    Enter: void,
+    Char: u8,
+};
+
+const Key = struct {
+    code: KeyCode,
+    ctrl: bool = false,
+    shift: bool = false,
+    alt: bool = false,
 };
 
 pub fn main() !void {
     assertTty();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const alloc = gpa.allocator();
     var ed: Editor = .{
         .term = .{
             .cout = std.io.bufferedWriter(std.io.getStdOut().writer()),
             .cin = std.io.bufferedReader(std.io.getStdIn().reader()),
         },
+        .lines = try std.ArrayList(?std.ArrayListUnmanaged(u8)).initCapacity(alloc, 1024),
+        .cursors = try std.ArrayList(Cursor).initCapacity(alloc, 32),
+        .action_queue = std.fifo.LinearFifo(Action, .{ .Static = 4096 }).init(),
     };
+
     try ed.init();
-    defer ed.deinit();
+    try ed.term.hideCursor();
 
     const size = try ed.term.getSize();
-    std.debug.print("Screen size: {d}x{d}\n\r", .{ size.width, size.height });
+    _ = size;
     while (true) {
-        const byte = try ed.term.readKey();
-        if (std.ascii.isControl(byte)) {
-            std.debug.print("{d}\n\r", .{byte});
-        } else {
-            std.debug.print("{d} ({c})\n\r", .{ byte, byte });
+        try ed.refreshScreen();
+        const key = try ed.term.readKey();
+        switch (key.code) {
+            .Char => |byte| {
+                if (key.ctrl) {
+                    const new_byte = unctrlKey(byte);
+                    std.debug.print("CTRL+{c} ({d})", .{ new_byte, new_byte });
+                } else {
+                    std.debug.print("{c} ({d})", .{ byte, byte });
+                }
+                if (key.ctrl == true and byte == 'q') {
+                    break;
+                }
+            },
+            else => {
+                std.debug.print("{any}\n\r", .{key});
+            },
         }
-        const getCursorPos = try ed.term.getCursorPos();
-        std.debug.print("{d},{d}\n\r", .{ getCursorPos.x, getCursorPos.y });
-        if (byte == ctrlKey('q')) break;
     }
+    ed.deinit();
+    try ed.term.showCursor();
+    const sw = ed.term.cout.writer();
+    try sw.writeAll("Goodbye from zedit!\n");
+    try ed.term.cout.flush();
 }
 
 inline fn ctrlKey(char: u8) u8 {
     return char & 0x1f;
+}
+inline fn unctrlKey(char: u8) u8 {
+    return char | 0x60;
+}
+inline fn altKey(char: u8) u8 {
+    return char | 0x80;
+}
+inline fn unaltKey(char: u8) u8 {
+    return char & 0x7f;
+}
+inline fn hasCtrl(char: u8) bool {
+    return char & 0x1f != 0;
+}
+inline fn hasAlt(char: u8) bool {
+    return char & 0x80 != 0;
 }
 
 test "simple test" {
