@@ -23,14 +23,14 @@ const Position = struct {
 
 const Terminal = struct {
     orig_termios: std.os.termios = undefined,
+    cout: std.io.BufferedWriter(4096, std.fs.File.Writer),
+    cin: std.io.BufferedReader(4096, std.fs.File.Reader),
 
     pub fn getCursorPos(self: *Terminal) !Position {
-        _ = self;
-        const stdout = std.io.getStdOut();
-        const stdin = std.io.getStdIn();
-        const sw = stdout.writer();
-        const sr = stdin.reader();
+        const sw = self.cout.writer();
+        const sr = self.cin.reader();
         try sw.writeAll("\x1b[6n");
+        try self.cout.flush();
         var buf: [32]u8 = undefined;
         var i: usize = 0;
         while (i < buf.len - 1) {
@@ -48,17 +48,18 @@ const Terminal = struct {
         buf[i] = 0;
         if (buf[0] != '\x1b' or buf[1] != '[') return error.InvalidUnicodeCodepoint;
         const semi_idx = std.mem.indexOfScalar(u8, &buf, ';') orelse return error.InvalidUnicodeCodepoint;
-        const x = try std.fmt.parseUnsigned(usize, buf[2..], 10);
-        const y = try std.fmt.parseUnsigned(usize, buf[semi_idx + 1 ..], 10);
+        const x = try std.fmt.parseUnsigned(usize, buf[2..semi_idx], 10);
+        const y = try std.fmt.parseUnsigned(usize, buf[semi_idx + 1 .. i], 10);
         return Position{ .x = x, .y = y };
     }
 
     pub fn getSize(self: *Terminal) !Size {
         var ws: std.os.linux.winsize = undefined;
         const stdout = std.io.getStdOut();
-        const sw = stdout.writer();
         if (std.c.ioctl(stdout.handle, c.TIOCGWINSZ, &ws) == -1 or ws.ws_col == 0) {
+            const sw = self.cout.writer();
             try sw.writeAll("\x1b[999C\x1b[999B");
+            try self.cout.flush();
             const cursor_pos = try self.getCursorPos();
             return Size{ .width = cursor_pos.x, .height = cursor_pos.y };
         }
@@ -66,27 +67,21 @@ const Terminal = struct {
     }
 
     pub fn initScreen(self: *Terminal) !void {
-        _ = self;
-        const stdout = std.io.getStdOut();
-        const sw = stdout.writer();
         const alternate_screen_code = "\x1b[?1049h";
+        const sw = self.cout.writer();
         try sw.writeAll(alternate_screen_code);
     }
 
     pub fn deinitScreen(self: *Terminal) void {
-        _ = self;
-        const stdout = std.io.getStdOut();
-        const sw = stdout.writer();
         const exit_alternate_screen_code = "\x1b[?1049l";
+        const sw = self.cout.writer();
         sw.writeAll(exit_alternate_screen_code) catch unreachable;
     }
 
     pub fn readKey(self: *Terminal) !u8 {
-        _ = self;
-        const stdin = std.io.getStdIn();
-        const reader = stdin.reader();
+        const sr = self.cin.reader();
         while (true) {
-            return reader.readByte() catch |err| switch (err) {
+            return sr.readByte() catch |err| switch (err) {
                 error.EndOfStream => continue,
                 else => return err,
             };
@@ -94,9 +89,7 @@ const Terminal = struct {
     }
 
     pub fn clear(self: *Terminal) !void {
-        _ = self;
-        const stdout = std.io.getStdOut();
-        const sw = stdout.writer();
+        const sw = self.cout.writer();
         const clear_screen_code = "\x1b[2J";
         try sw.writeAll(clear_screen_code);
         const cursor_home_code = "\x1b[H";
@@ -130,6 +123,7 @@ const Terminal = struct {
         termios.cc[c.VMIN] = 0;
         try std.os.tcsetattr(stdout.handle, std.os.TCSA.FLUSH, termios);
     }
+
     pub fn disableRawMode(self: *Terminal) void {
         const stdout = std.io.getStdOut();
         // restore the original terminal settings
@@ -145,36 +139,43 @@ pub fn assertTty() void {
 }
 
 const Editor = struct {
-    terminal: Terminal = .{},
+    term: Terminal,
 
     pub fn init(self: *Editor) !void {
-        try self.terminal.initScreen();
-        try self.terminal.enableRawMode();
-        try self.terminal.clear();
+        try self.term.initScreen();
+        try self.term.enableRawMode();
+        try self.term.clear();
+        try self.term.cout.flush();
     }
 
     pub fn deinit(self: *Editor) void {
-        self.terminal.deinitScreen();
-        self.terminal.disableRawMode();
+        self.term.deinitScreen();
+        self.term.disableRawMode();
     }
 };
 
 pub fn main() !void {
     assertTty();
-    var ed: Editor = .{};
+    var ed: Editor = .{
+        .term = .{
+            .cout = std.io.bufferedWriter(std.io.getStdOut().writer()),
+            .cin = std.io.bufferedReader(std.io.getStdIn().reader()),
+        },
+    };
     try ed.init();
     defer ed.deinit();
 
-    std.debug.print("All your {s} are belong to us.\n\r", .{"codebase"});
-    const size = try ed.terminal.getSize();
+    const size = try ed.term.getSize();
     std.debug.print("Screen size: {d}x{d}\n\r", .{ size.width, size.height });
     while (true) {
-        const byte = try ed.terminal.readKey();
+        const byte = try ed.term.readKey();
         if (std.ascii.isControl(byte)) {
             std.debug.print("{d}\n\r", .{byte});
         } else {
             std.debug.print("{d} ({c})\n\r", .{ byte, byte });
         }
+        const getCursorPos = try ed.term.getCursorPos();
+        std.debug.print("{d},{d}\n\r", .{ getCursorPos.x, getCursorPos.y });
         if (byte == ctrlKey('q')) break;
     }
 }
