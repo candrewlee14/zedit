@@ -4,13 +4,6 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
 });
 
-const Rect = struct {
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-};
-
 const Size = struct {
     width: usize,
     height: usize,
@@ -114,10 +107,10 @@ const Terminal = struct {
                         return err;
                     };
                     switch (third_byte) {
-                        'A' => return .{ .code = .{ .ArrowUp = {} } },
-                        'B' => return .{ .code = .{ .ArrowDown = {} } },
-                        'C' => return .{ .code = .{ .ArrowRight = {} } },
-                        'D' => return .{ .code = .{ .ArrowLeft = {} } },
+                        'A' => return .{ .code = .{ .Arrow = .up } },
+                        'B' => return .{ .code = .{ .Arrow = .down } },
+                        'C' => return .{ .code = .{ .Arrow = .right } },
+                        'D' => return .{ .code = .{ .Arrow = .left } },
                         'H' => return .{ .code = .{ .Home = {} } },
                         'F' => return .{ .code = .{ .End = {} } },
                         '5' => {
@@ -157,9 +150,9 @@ const Terminal = struct {
                 }
             },
             127 => return .{ .code = .{ .Backspace = {} } },
-            10 => return .{ .code = .{ .Enter = {} } },
+            10, '\r' => return .{ .code = .{ .Enter = {} } },
             else => return .{
-                .code = .{ .Char = unaltKey(unctrlKey(byte)) },
+                .code = .{ .Char = byte },
                 .ctrl = std.ascii.isControl(byte),
             },
         }
@@ -231,6 +224,7 @@ const Editor = struct {
     cursors: std.ArrayList(Cursor),
 
     pub fn init(self: *Editor) !void {
+        try self.lines.append(try std.ArrayListUnmanaged(u8).initCapacity(self.lines.allocator, 64));
         try self.term.initScreen();
         try self.term.hideCursor();
         try self.term.enableRawMode();
@@ -245,6 +239,20 @@ const Editor = struct {
         self.term.disableRawMode();
     }
 
+    pub fn insertText(self: *Editor, text: []const u8) !void {
+        for (self.cursors.items) |*cursor| {
+            while (cursor.line >= self.lines.items.len) {
+                try self.lines.append(try std.ArrayListUnmanaged(u8).initCapacity(self.lines.allocator, 64));
+            }
+            const line = &(self.lines.items[cursor.line].?);
+            if (cursor.col >= line.items.len) {
+                try line.appendNTimes(self.lines.allocator, ' ', cursor.col - line.items.len);
+            }
+            try line.insertSlice(self.lines.allocator, cursor.col, text);
+            cursor.col += text.len;
+        }
+    }
+
     pub fn refreshScreen(self: *Editor) !void {
         // try self.term.hideCursor();
         try self.term.clear();
@@ -252,7 +260,7 @@ const Editor = struct {
         for (0..size.height) |i| {
             const sw = self.term.cout.writer();
             // try sw.print("{d} ", .{i + 1});
-            try sw.writeAll("~ ");
+            // try sw.writeAll("~ ");
             const str_i = self.cur_scroll + i;
             if (str_i < self.lines.items.len) {
                 if (self.lines.items[str_i]) |line| {
@@ -280,14 +288,59 @@ const Editor = struct {
         try self.term.cout.flush();
     }
 
-    pub fn moveCursors(self: *Editor, dx: isize, dy: isize) !void {
-        for (self.cursors.items) |cursor| {
-            const new_line = @as(isize, @intCast(cursor.line)) + dy;
+    pub fn moveCursors(self: *Editor, dline: isize, dcol: isize) !void {
+        for (self.cursors.items) |*cursor| {
+            var new_line = @as(isize, @intCast(cursor.line)) + dline;
             new_line = @max(new_line, 0);
-            const new_col = @as(isize, @intCast(cursor.col)) + dx;
-            _ = new_col;
+            new_line = @min(new_line, @as(isize, @intCast(self.lines.items.len - 1)));
+            var new_col = @as(isize, @intCast(cursor.col)) + dcol;
+            new_col = @max(new_col, 0);
+            cursor.line = @intCast(new_line);
+
+            const line_o = self.lines.items[cursor.line];
+            if (line_o) |line| {
+                new_col = @min(new_col, @as(isize, @intCast(line.items.len)));
+            } else {
+                new_col = 0;
+            }
+            cursor.col = @intCast(new_col);
         }
     }
+
+    pub fn moveNewline(self: *Editor) !void {
+        for (self.cursors.items) |*cursor| {
+            cursor.line += 1;
+            cursor.col = 0;
+        }
+    }
+
+    pub fn backspace(self: *Editor) !void {
+        for (self.cursors.items) |*cursor| {
+            if (cursor.col > 0) {
+                cursor.col -= 1;
+                const line = &(self.lines.items[cursor.line].?);
+                _ = line.orderedRemove(cursor.col);
+            }
+        }
+    }
+    pub fn endline(self: *Editor) !void {
+        for (self.cursors.items) |*cursor| {
+            const line = &(self.lines.items[cursor.line].?);
+            cursor.col = line.items.len;
+        }
+    }
+    pub fn homeline(self: *Editor) !void {
+        for (self.cursors.items) |*cursor| {
+            cursor.col = 0;
+        }
+    }
+};
+
+const Direction = enum(u8) {
+    up,
+    down,
+    left,
+    right,
 };
 
 const KeyCode = union(enum) {
@@ -296,10 +349,7 @@ const KeyCode = union(enum) {
     End: void,
     PageUp: void,
     PageDown: void,
-    ArrowLeft: void,
-    ArrowRight: void,
-    ArrowUp: void,
-    ArrowDown: void,
+    Arrow: Direction,
     Delete: void,
     Backspace: void,
     Enter: void,
@@ -338,14 +388,25 @@ pub fn main() !void {
         switch (key.code) {
             .Char => |byte| {
                 if (key.ctrl) {
-                    const new_byte = unctrlKey(byte);
+                    const new_byte = byte | 0x40;
                     std.debug.print("CTRL+{c} ({d})", .{ new_byte, new_byte });
                 } else {
-                    std.debug.print("{c} ({d})", .{ byte, byte });
+                    // std.debug.print("{c} ({d})", .{ byte, byte });
+                    try ed.insertText(&.{byte});
                 }
-                if (key.ctrl == true and byte == 'q') {
+                if (key.ctrl == true and byte == ctrlKey('q')) {
                     break;
                 }
+            },
+            .End => try ed.endline(),
+            .Backspace => try ed.backspace(),
+            .Enter => try ed.moveNewline(),
+            .Home => try ed.homeline(),
+            .Arrow => |dir| switch (dir) {
+                .up => try ed.moveCursors(-1, 0),
+                .down => try ed.moveCursors(1, 0),
+                .left => try ed.moveCursors(0, -1),
+                .right => try ed.moveCursors(0, 1),
             },
             else => {
                 std.debug.print("{any}\n\r", .{key});
@@ -362,20 +423,8 @@ pub fn main() !void {
 inline fn ctrlKey(char: u8) u8 {
     return char & 0x1f;
 }
-inline fn unctrlKey(char: u8) u8 {
-    return char | 0x60;
-}
 inline fn altKey(char: u8) u8 {
     return char | 0x80;
-}
-inline fn unaltKey(char: u8) u8 {
-    return char & 0x7f;
-}
-inline fn hasCtrl(char: u8) bool {
-    return char & 0x1f != 0;
-}
-inline fn hasAlt(char: u8) bool {
-    return char & 0x80 != 0;
 }
 
 test "simple test" {
