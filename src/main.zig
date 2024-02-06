@@ -57,7 +57,7 @@ const Terminal = struct {
 
     pub fn navCurTo(self: *Terminal, pos: Position) !void {
         const sw = self.cout.writer();
-        try sw.print("\x1b[{d};{d}H", .{ pos.y, pos.x });
+        try sw.print("\x1b[{d};{d}H", .{ pos.y + 1, pos.x + 1 });
     }
 
     pub fn getSize(self: *Terminal) !Size {
@@ -146,6 +146,13 @@ const Terminal = struct {
                         else => return .{ .code = .{ .Escape = {} } },
                     }
                 } else {
+                    if (std.ascii.isASCII(second_byte)) {
+                        return .{
+                            .code = .{ .Char = second_byte },
+                            .ctrl = std.ascii.isControl(second_byte),
+                            .alt = true,
+                        };
+                    }
                     return .{ .code = .{ .Escape = {} } };
                 }
             },
@@ -154,6 +161,7 @@ const Terminal = struct {
             else => return .{
                 .code = .{ .Char = byte },
                 .ctrl = std.ascii.isControl(byte),
+                .alt = isAltKey(byte),
             },
         }
     }
@@ -179,7 +187,9 @@ const Terminal = struct {
         termios.iflag &= ~(std.os.linux.IXON | std.os.linux.ICRNL | std.os.linux.BRKINT | std.os.linux.INPCK | std.os.linux.ISTRIP);
         // ECHO turns off echoing of typed characters
         // ICANON turns off canonical mode, which means input is read byte-by-byte
-        termios.lflag &= ~(std.os.linux.ECHO | std.os.linux.ICANON);
+        // IEXTEN disables Ctrl-V and Ctrl-O
+        // ISIG disables Ctrl-C and Ctrl-Z
+        termios.lflag &= ~(std.os.linux.ECHO | std.os.linux.ICANON | std.os.linux.IEXTEN | std.os.linux.ISIG);
         // OPOST turns off output processing, which means output is written byte-by-byte
         termios.oflag &= ~(std.os.linux.OPOST);
         // CS8 sets the character size to 8 bits per byte
@@ -214,6 +224,10 @@ const Cursor = struct {
     line: usize,
     col: usize,
     // selection_len: ?usize = null,
+
+    pub fn lessThan(_: void, self: Cursor, other: Cursor) bool {
+        return self.line < other.line or (self.line == other.line and self.col < other.col);
+    }
 };
 
 const Editor = struct {
@@ -237,6 +251,14 @@ const Editor = struct {
     pub fn deinit(self: *Editor) void {
         self.term.deinitScreen();
         self.term.disableRawMode();
+        for (self.lines.items) |*line_o| {
+            if (line_o.*) |*line| {
+                line.deinit(self.lines.allocator);
+            }
+        }
+        self.lines.deinit();
+        self.cursors.deinit();
+        self.action_queue.deinit();
     }
 
     pub fn insertText(self: *Editor, text: []const u8) !void {
@@ -279,23 +301,55 @@ const Editor = struct {
             }
         }
         for (self.cursors.items) |cursor| {
-            const sw = self.term.cout.writer();
-            try sw.print("\x1b[{d};{d}H", .{ cursor.line + 1, cursor.col + 1 });
-            // print white block
-            try sw.writeAll("\xe2\x96\x88");
-        }
+            if (cursor.line < self.cur_scroll and cursor.line >= self.cur_scroll + size.height) continue;
+            try self.term.navCurTo(.{ .x = cursor.col, .y = cursor.line - self.cur_scroll });
 
+            const sw = self.term.cout.writer();
+            try sw.writeAll("\x1b[47m");
+            try sw.writeAll("\x1b[30m");
+            if (cursor.line >= self.lines.items.len) {
+                try sw.writeAll(" ");
+            } else {
+                if (self.lines.items[cursor.line]) |line| {
+                    const line_len = line.items.len;
+                    if (cursor.col < line_len) {
+                        // TODO: this should be a unicode codepoint, not just a byte
+                        try sw.writeByte(line.items[cursor.col]);
+                    } else {
+                        try sw.writeAll(" ");
+                    }
+                } else {
+                    try sw.writeAll(" ");
+                }
+            }
+            try sw.writeAll("\x1b[0m");
+        }
+        try self.printCursorInfo();
         try self.term.cout.flush();
     }
 
+    inline fn updateCurScroll(self: *Editor, cursor: Cursor, size: Size) void {
+        if (cursor.line >= self.cur_scroll + size.height) {
+            self.cur_scroll = cursor.line - size.height + 1;
+        } else if (cursor.line < self.cur_scroll) {
+            self.cur_scroll = cursor.line;
+        }
+    }
+
     pub fn moveCursors(self: *Editor, dline: isize, dcol: isize) !void {
-        for (self.cursors.items) |*cursor| {
+        const size = try self.term.getSize();
+        var idx: usize = self.cursors.items.len;
+        while (idx > 0) : (idx -= 1) {
+            const i = idx - 1;
+            const cursor = &self.cursors.items[i];
             var new_line = @as(isize, @intCast(cursor.line)) + dline;
             new_line = @max(new_line, 0);
             new_line = @min(new_line, @as(isize, @intCast(self.lines.items.len - 1)));
             var new_col = @as(isize, @intCast(cursor.col)) + dcol;
             new_col = @max(new_col, 0);
             cursor.line = @intCast(new_line);
+
+            self.updateCurScroll(cursor.*, size);
 
             const line_o = self.lines.items[cursor.line];
             if (line_o) |line| {
@@ -304,34 +358,193 @@ const Editor = struct {
                 new_col = 0;
             }
             cursor.col = @intCast(new_col);
+            // remove duplicates (assuming sorted)
+            if (i < self.cursors.items.len - 1 and self.cursors.items[i + 1].line == cursor.line) {
+                _ = self.cursors.orderedRemove(i);
+            }
+        }
+    }
+
+    pub fn addCursorIfNoDuplicates(self: *Editor, cursor: Cursor, checks: []const Cursor) !void {
+        var any_same_col = false;
+        for (checks) |cur| {
+            if (cur.line == cursor.line and cur.col == cursor.col) {
+                any_same_col = true;
+                break;
+            }
+        }
+        if (!any_same_col) {
+            try self.cursors.append(cursor);
+        }
+        std.mem.sortUnstable(Cursor, self.cursors.items, {}, Cursor.lessThan);
+    }
+
+    pub fn addCursors(self: *Editor, dline: isize) !void {
+        std.debug.assert(dline == 1 or dline == -1);
+        const item_count = self.cursors.items.len;
+        std.mem.sortUnstable(Cursor, self.cursors.items[0..item_count], {}, Cursor.lessThan);
+        for (self.cursors.items[0..item_count], 0..) |cursor, i| {
+            const new_line = @as(isize, @intCast(cursor.line)) + dline;
+            if (new_line < 0) continue;
+            if (new_line > @as(isize, @intCast(self.lines.items.len - 1))) continue;
+            const new_cursor = Cursor{ .line = @intCast(new_line), .col = cursor.col };
+
+            var check_idx: usize = i;
+            // find the first cursor that is on the same line in the sorted cursors list
+            if (dline > 0) {
+                while (check_idx < item_count and self.cursors.items[check_idx].line < new_cursor.line) {
+                    check_idx += 1;
+                }
+            } else if (dline < 0) {
+                while (check_idx > 0 and self.cursors.items[check_idx].line > new_cursor.line) {
+                    check_idx -= 1;
+                }
+            } else unreachable;
+            // check if any of the same-line cursors are in the same col (duplicates)
+            var any_same_col = false;
+            while (check_idx >= 0 and check_idx < item_count and self.cursors.items[check_idx].line == new_cursor.line) {
+                const check_cur = self.cursors.items[check_idx];
+                if (check_cur.col == new_cursor.col) {
+                    any_same_col = true;
+                    break;
+                }
+                if (dline > 0) {
+                    check_idx += 1;
+                } else if (dline < 0) {
+                    if (check_idx > 0) break;
+                    check_idx -= 1;
+                } else unreachable;
+            }
+            // if there are no duplicates, add the new cursor
+            if (!any_same_col) {
+                try self.cursors.append(new_cursor);
+            }
+        }
+        std.mem.sortUnstable(Cursor, self.cursors.items, {}, Cursor.lessThan);
+    }
+
+    pub fn printCursorInfo(self: *Editor) !void {
+        const size = try self.term.getSize();
+        for (self.cursors.items, 0..) |cursor, i| {
+            const sw = self.term.cout.writer();
+            // goto right side top of screen
+            try sw.print("\x1b[{d};{d}H", .{ i + 1, size.width - 10 });
+            try sw.print("({d}, {d}) ", .{ cursor.line, cursor.col });
+        }
+    }
+
+    pub fn insertLine(self: *Editor, idx: usize, new_line: std.ArrayListUnmanaged(u8)) !void {
+        try self.lines.insert(idx, new_line);
+        for (self.cursors.items) |*cursor| {
+            if (cursor.line >= idx) {
+                cursor.line += 1;
+            }
+        }
+    }
+
+    pub fn removeLine(self: *Editor, idx: usize) !void {
+        _ = self.lines.orderedRemove(idx);
+        for (self.cursors.items) |*cursor| {
+            if (cursor.line >= idx) {
+                // TODO: if the cursor == idx, should we just delete the cursor?
+                cursor.line -= 1;
+            }
         }
     }
 
     pub fn moveNewline(self: *Editor) !void {
-        for (self.cursors.items) |*cursor| {
+        const size = try self.term.getSize();
+        // assume all cursors are sorted top to bottom
+        var idx: usize = self.cursors.items.len;
+        while (idx > 0) : (idx -= 1) {
+            const i = idx - 1;
+            const cursor = &self.cursors.items[i];
+            const cur_line_o = &self.lines.items[cursor.line];
+            if (cur_line_o.*) |*cur_line| {
+                if (cursor.col < cur_line.items.len) {
+                    var new_line = try std.ArrayListUnmanaged(u8).initCapacity(self.lines.allocator, 64);
+                    try new_line.appendSlice(self.lines.allocator, cur_line.items[cursor.col..]);
+                    try cur_line.resize(self.lines.allocator, cursor.col);
+                    try self.insertLine(cursor.line + 1, new_line);
+                }
+            }
             cursor.line += 1;
+            self.updateCurScroll(cursor.*, size);
+            while (cursor.line >= self.lines.items.len) {
+                try self.lines.append(try std.ArrayListUnmanaged(u8).initCapacity(self.lines.allocator, 64));
+            }
             cursor.col = 0;
         }
     }
 
     pub fn backspace(self: *Editor) !void {
-        for (self.cursors.items) |*cursor| {
+        // assume all cursors are sorted top to bottom
+        var idx1: usize = self.cursors.items.len;
+        while (idx1 > 0) : (idx1 -= 1) {
+            const i = idx1 - 1;
+            const cursor = &self.cursors.items[i];
             if (cursor.col > 0) {
                 cursor.col -= 1;
                 const line = &(self.lines.items[cursor.line].?);
                 _ = line.orderedRemove(cursor.col);
+            } else if (cursor.line > 0) {
+                const prev_line = &(self.lines.items[cursor.line - 1].?);
+                const prev_line_len = prev_line.items.len;
+                cursor.col = prev_line_len;
+                const cur_line = &(self.lines.items[cursor.line].?);
+                try prev_line.appendSlice(self.lines.allocator, cur_line.items);
+                _ = self.lines.orderedRemove(cursor.line);
+                // move all cursors on or past the deleted line up one
+                for (self.cursors.items, 0..) |*move_cur, j| {
+                    if (i != j and cursor.line <= move_cur.line) {
+                        if (cursor.line == move_cur.line) {
+                            move_cur.col = prev_line_len + move_cur.col;
+                        }
+                        move_cur.line -= 1;
+                    }
+                }
+                cursor.line -= 1;
+            }
+            // last cursor can be ignored
+            if (i < self.cursors.items.len - 1) {
+                var any_same_col = false;
+                for (self.cursors.items[i + 1 ..]) |*check_cur| {
+                    if (check_cur.line == cursor.line and check_cur.col == cursor.col) {
+                        any_same_col = true;
+                        break;
+                    }
+                }
+                if (any_same_col) {
+                    _ = self.cursors.orderedRemove(i);
+                }
             }
         }
     }
+
     pub fn endline(self: *Editor) !void {
-        for (self.cursors.items) |*cursor| {
+        var idx: usize = self.cursors.items.len;
+        while (idx > 0) : (idx -= 1) {
+            const i = idx - 1;
+            const cursor = &self.cursors.items[i];
             const line = &(self.lines.items[cursor.line].?);
             cursor.col = line.items.len;
+            // remove duplicates (assuming sorted)
+            if (i < self.cursors.items.len - 1 and self.cursors.items[i + 1].line == cursor.line) {
+                _ = self.cursors.orderedRemove(i);
+            }
         }
     }
+
     pub fn homeline(self: *Editor) !void {
-        for (self.cursors.items) |*cursor| {
+        var idx: usize = self.cursors.items.len;
+        while (idx > 0) : (idx -= 1) {
+            const i = idx - 1;
+            const cursor = &self.cursors.items[i];
             cursor.col = 0;
+            // remove duplicates (assuming sorted)
+            if (i < self.cursors.items.len - 1 and self.cursors.items[i + 1].line == cursor.line) {
+                _ = self.cursors.orderedRemove(i + 1);
+            }
         }
     }
 };
@@ -363,6 +576,13 @@ const Key = struct {
     alt: bool = false,
 };
 
+const Rect = struct {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+};
+
 pub fn main() !void {
     assertTty();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -377,7 +597,13 @@ pub fn main() !void {
         .action_queue = std.fifo.LinearFifo(Action, .{ .Static = 4096 }).init(),
     };
 
+    const sw = ed.term.cout.writer();
+    defer ed.term.cout.flush() catch @panic("flushing cout failed");
+    defer ed.term.showCursor() catch @panic("showing cursor failed");
+    defer sw.writeAll("Goodbye from zedit!\n") catch @panic("writing goodbye message failed");
+
     try ed.init();
+    defer ed.deinit();
     try ed.term.hideCursor();
 
     const size = try ed.term.getSize();
@@ -390,8 +616,14 @@ pub fn main() !void {
                 if (key.ctrl) {
                     const new_byte = byte | 0x40;
                     std.debug.print("CTRL+{c} ({d})", .{ new_byte, new_byte });
+                } else if (key.alt) {
+                    std.debug.print("ALT+{c} ({d})", .{ byte, byte });
+                    if (byte == 'J') {
+                        try ed.addCursors(1);
+                    } else if (byte == 'K') {
+                        try ed.addCursors(-1);
+                    }
                 } else {
-                    // std.debug.print("{c} ({d})", .{ byte, byte });
                     try ed.insertText(&.{byte});
                 }
                 if (key.ctrl == true and byte == ctrlKey('q')) {
@@ -413,11 +645,6 @@ pub fn main() !void {
             },
         }
     }
-    ed.deinit();
-    try ed.term.showCursor();
-    const sw = ed.term.cout.writer();
-    try sw.writeAll("Goodbye from zedit!\n");
-    try ed.term.cout.flush();
 }
 
 inline fn ctrlKey(char: u8) u8 {
@@ -425,6 +652,9 @@ inline fn ctrlKey(char: u8) u8 {
 }
 inline fn altKey(char: u8) u8 {
     return char | 0x80;
+}
+inline fn isAltKey(char: u8) bool {
+    return char & 0x80 == 0x80;
 }
 
 test "simple test" {
