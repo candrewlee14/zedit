@@ -38,3 +38,13 @@ pub const Rect = struct {
     origin: Position,
     size: Size,
 };
+
+pub const Cursor = struct {
+    line: usize,
+    col: usize,
+    // selection_len: ?usize = null,
+
+    pub fn lessThan(_: void, self: Cursor, other: Cursor) bool {
+        return self.line < other.line or (self.line == other.line and self.col < other.col);
+    }
+};
