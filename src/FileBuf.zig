@@ -26,45 +26,14 @@ pub fn init(self: *Self) !void {
     self.cursors = try std.ArrayListUnmanaged(Cursor).initCapacity(alloc, 16);
     try self.cursors.append(alloc, .{ .line = 0, .col = 0 });
 
+    // set up the window
     const vtable = try alloc.create(WindowImpl.VTable);
-    vtable.* = .{
-        .render = Self.render,
-        .getChildren = Self.getChildren,
-        .layoutChildren = Self.layoutChildren,
-    };
-    self.window = .{
-        .rect = Rect{
-            .origin = .{ .x = 0, .y = 0 },
-            // this will be changed by the parent's layoutChildren method
-            .size = .{ .width = 0, .height = 0 },
-        },
-        .with_border = true,
-        .ptr = @ptrCast(self),
-        .vtable = vtable,
-    };
+    vtable.* = .{ .render = Self.render };
+    self.window = .{ .ptr = @ptrCast(self), .vtable = vtable, .with_border = true };
 }
-
 pub fn deinit(self: *Self) void {
     self.arena.deinit();
-    // for (self.lines.items) |*line_o| {
-    //     if (line_o.*) |*line| {
-    //         line.deinit(alloc);
-    //     }
-    // }
-    // self.lines.deinit(alloc);
-    // self.cursors.deinit(alloc);
-    // self.lines.allocator.destroy(self.window.vtable);
 }
-
-fn getChildren(ctx: *anyopaque) []*const WindowImpl {
-    _ = ctx;
-    return &.{};
-}
-fn layoutChildren(ctx: *anyopaque) anyerror!void {
-    _ = ctx;
-    return;
-}
-
 fn render(ctx: *anyopaque, term: *Terminal, rect: Rect) anyerror!void {
     const self: *Self = @alignCast(@ptrCast(ctx));
     const size = rect.size;
@@ -273,6 +242,8 @@ pub fn moveNewline(self: *Self) !void {
                 try new_line.appendSlice(alloc, cur_line.items[cursor.col..]);
                 try cur_line.resize(alloc, cursor.col);
                 try self.insertLine(cursor.line + 1, new_line);
+            } else {
+                try self.insertLine(cursor.line + 1, try std.ArrayListUnmanaged(u8).initCapacity(alloc, 64));
             }
         }
         cursor.line += 1;

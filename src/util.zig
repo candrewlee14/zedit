@@ -35,8 +35,8 @@ pub const Direction = enum(u8) {
 };
 
 pub const Rect = struct {
-    origin: Position,
-    size: Size,
+    origin: Position = .{ .x = 0, .y = 0 },
+    size: Size = .{ .width = 0, .height = 0 },
 };
 
 pub const Cursor = struct {
