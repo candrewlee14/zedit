@@ -6,6 +6,9 @@ const Size = util.Size;
 const Rect = util.Rect;
 const WindowImpl = @import("./WindowImpl.zig");
 
+const log = @import("./log.zig");
+const logger = &log.logger;
+
 const Self = @This();
 
 arena: std.heap.ArenaAllocator,
@@ -31,9 +34,11 @@ pub fn init(self: *Self) !void {
     vtable.* = .{ .render = Self.render };
     self.window = .{ .ptr = @ptrCast(self), .vtable = vtable, .with_border = true };
 }
+
 pub fn deinit(self: *Self) void {
     self.arena.deinit();
 }
+
 fn render(ctx: *anyopaque, term: *Terminal, rect: Rect) anyerror!void {
     const self: *Self = @alignCast(@ptrCast(ctx));
     const size = rect.size;
@@ -156,7 +161,11 @@ pub fn addCursors(self: *Self, dline: isize) !void {
     std.debug.assert(dline == 1 or dline == -1);
     const item_count = self.cursors.items.len;
     std.mem.sortUnstable(Cursor, self.cursors.items[0..item_count], {}, Cursor.lessThan);
-    for (self.cursors.items[0..item_count], 0..) |cursor, i| {
+    var i: usize = 0;
+    // Once upon a time, the following line was a for loop over the cursors, but I found out the hard way
+    // that the append that happens in this block would invalidate that slice and give us bad memory
+    while (i < item_count) : (i += 1) {
+        const cursor = &self.cursors.items[i];
         const new_line = @as(isize, @intCast(cursor.line)) + dline;
         if (new_line < 0) continue;
         if (new_line > @as(isize, @intCast(self.lines.items.len - 1))) continue;
@@ -222,7 +231,7 @@ pub fn removeLine(self: *Self, idx: usize) !void {
     for (self.cursors.items) |*cursor| {
         if (cursor.line >= idx) {
             // TODO: if the cursor == idx, should we just delete the cursor?
-            cursor.line -= 1;
+            cursor.line -|= 1;
         }
     }
 }
@@ -282,10 +291,10 @@ pub fn backspace(self: *Self) !void {
                     if (cursor.line == move_cur.line) {
                         move_cur.col = prev_line_len + move_cur.col;
                     }
-                    move_cur.line -= 1;
+                    move_cur.line -|= 1;
                 }
             }
-            cursor.line -= 1;
+            cursor.line -|= 1;
         }
         // last cursor can be ignored
         if (i < self.cursors.items.len - 1) {
