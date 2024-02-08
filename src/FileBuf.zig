@@ -63,8 +63,12 @@ fn render(ctx: *anyopaque, term: *Terminal, rect: Rect) anyerror!void {
     }
     for (self.cursors.items) |cursor| {
         if (cursor.line < self.cur_scroll and cursor.line >= self.cur_scroll + size.height) continue;
+        const line_len = blk: {
+            if (cursor.line >= self.lines.items.len) break :blk 0;
+            break :blk if (self.lines.items[cursor.line]) |line| line.items.len else 0;
+        };
         try term.navCurTo(.{
-            .x = rect.origin.x + cursor.col,
+            .x = rect.origin.x + @min(cursor.col, line_len),
             .y = rect.origin.y + cursor.line - self.cur_scroll,
         });
 
@@ -72,22 +76,25 @@ fn render(ctx: *anyopaque, term: *Terminal, rect: Rect) anyerror!void {
         // this sets the background white and foreground black
         try sw.writeAll("\x1b[47m");
         try sw.writeAll("\x1b[30m");
-        if (cursor.line >= self.lines.items.len) {
-            try sw.writeAll(" ");
+        if (cursor.col < line_len) {
+            // TODO: this should be a unicode codepoint, not just a byte
+            const line = self.lines.items[cursor.line].?;
+            try sw.writeByte(line.items[cursor.col]);
         } else {
-            if (self.lines.items[cursor.line]) |line| {
-                const line_len = line.items.len;
-                if (cursor.col < line_len) {
-                    // TODO: this should be a unicode codepoint, not just a byte
-                    try sw.writeByte(line.items[cursor.col]);
-                } else {
-                    try sw.writeAll(" ");
-                }
-            } else {
-                try sw.writeAll(" ");
-            }
+            try sw.writeAll(" ");
         }
         try sw.writeAll("\x1b[0m");
+    }
+}
+
+pub fn boundCursor(self: *Self) !void {
+    for (self.cursors.items) |*cursor| {
+        cursor.line = @min(cursor.line, self.lines.items.len);
+        if (self.lines.items[cursor.line]) |line| {
+            cursor.col = @min(cursor.col, line.items.len);
+        } else {
+            cursor.col = 0;
+        }
     }
 }
 
@@ -114,6 +121,32 @@ inline fn updateCurScroll(self: *Self, cursor: Cursor, size: Size) void {
     }
 }
 
+pub fn normalEnter(self: *Self) !void {
+    const size = self.window.rect.size;
+    var idx: usize = self.cursors.items.len;
+    while (idx > 0) : (idx -= 1) {
+        const i = idx - 1;
+        const cursor = &self.cursors.items[i];
+        var new_line = @as(isize, @intCast(cursor.line)) + 1;
+        new_line = @max(new_line, 0);
+        const last_line = @as(isize, @intCast(self.lines.items.len - 1));
+        if (new_line > last_line) continue;
+        cursor.line = @intCast(new_line);
+
+        const line_o = self.lines.items[cursor.line];
+        if (line_o) |line| {
+            cursor.col = @min(cursor.col, line.items.len);
+        } else {
+            cursor.col = 0;
+        }
+        // remove duplicates (assuming sorted)
+        if (i < self.cursors.items.len - 1 and self.cursors.items[i + 1].line == cursor.line) {
+            _ = self.cursors.orderedRemove(i);
+        }
+        self.updateCurScroll(cursor.*, size);
+    }
+}
+
 pub fn moveCursors(self: *Self, dline: isize, dcol: isize) !void {
     const size = self.window.rect.size;
     var idx: usize = self.cursors.items.len;
@@ -127,19 +160,20 @@ pub fn moveCursors(self: *Self, dline: isize, dcol: isize) !void {
         new_col = @max(new_col, 0);
         cursor.line = @intCast(new_line);
 
-        self.updateCurScroll(cursor.*, size);
-
-        const line_o = self.lines.items[cursor.line];
-        if (line_o) |line| {
-            new_col = @min(new_col, @as(isize, @intCast(line.items.len)));
-        } else {
-            new_col = 0;
+        if (dcol != 0) {
+            const line_o = self.lines.items[cursor.line];
+            if (line_o) |line| {
+                new_col = @min(new_col, @as(isize, @intCast(line.items.len)));
+            } else {
+                new_col = 0;
+            }
+            cursor.col = @intCast(new_col);
         }
-        cursor.col = @intCast(new_col);
         // remove duplicates (assuming sorted)
         if (i < self.cursors.items.len - 1 and self.cursors.items[i + 1].line == cursor.line) {
             _ = self.cursors.orderedRemove(i);
         }
+        self.updateCurScroll(cursor.*, size);
     }
 }
 

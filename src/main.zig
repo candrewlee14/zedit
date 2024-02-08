@@ -224,15 +224,24 @@ const Editor = struct {
         switch (self.mode) {
             .normal => {
                 if (self.config.normal_actions.get(key)) |action| switch (action) {
-                    .insert => self.mode = .edit,
+                    .insert => {
+                        try fb.boundCursor();
+                        self.mode = .edit;
+                    },
+                    .insert_after => {
+                        try fb.moveCursors(0, 1);
+                        try fb.boundCursor();
+                        self.mode = .edit;
+                    },
+                    .insert_at_eol => {
+                        try fb.endline();
+                        self.mode = .edit;
+                    },
                     .move_up => try fb.moveCursors(-1, 0),
                     .move_down => try fb.moveCursors(1, 0),
                     .move_left => try fb.moveCursors(0, -1),
                     .move_right => try fb.moveCursors(0, 1),
-                    .enter => {
-                        try fb.moveCursors(1, 0);
-                        try fb.homeline();
-                    },
+                    .enter => try fb.normalEnter(),
                     .insert_newline_above => {
                         try fb.createNewLine(0);
                         self.mode = .edit;
@@ -240,6 +249,10 @@ const Editor = struct {
                     .insert_newline_below => {
                         try fb.createNewLine(1);
                         self.mode = .edit;
+                    },
+                    .delete => {
+                        try fb.moveCursors(0, 1);
+                        try fb.backspace();
                     },
                     .add_cur_up => try fb.addCursors(-1),
                     .add_cur_down => try fb.addCursors(1),
@@ -268,6 +281,10 @@ const Editor = struct {
                     .backspace => try fb.backspace(),
                     .home => try fb.homeline(),
                     .end => try fb.endline(),
+                    .delete => {
+                        try fb.moveCursors(0, 1);
+                        try fb.backspace();
+                    },
                     .quit => return true,
                     // else => logger.log("{any}", .{action}),
                     // handle non-configured actions

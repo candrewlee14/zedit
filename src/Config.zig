@@ -5,9 +5,13 @@ const KeyCode = util.KeyCode;
 
 const Self = @This();
 
-const NormalAction = enum {
+pub const ActionInt = u16;
+
+pub const NormalAction = enum(ActionInt) {
     search,
     insert,
+    insert_after,
+    insert_at_eol,
     insert_newline_above,
     insert_newline_below,
     to_cmd,
@@ -19,13 +23,14 @@ const NormalAction = enum {
     add_cur_up,
     add_cur_down,
     backspace,
+    delete,
     home,
     end,
     enter,
     quit,
 };
 
-const EditAction = enum {
+pub const EditAction = enum(ActionInt) {
     to_normal,
 
     move_down,
@@ -35,10 +40,16 @@ const EditAction = enum {
     add_cur_up,
     add_cur_down,
     backspace,
+    delete,
     home,
     end,
     enter,
     quit,
+};
+
+const ActionMap = union(enum) {
+    Map: std.AutoHashMapUnmanaged(Key, ActionMap),
+    Action: ActionInt,
 };
 
 normal_actions: std.AutoHashMap(Key, NormalAction) = undefined,
@@ -58,6 +69,8 @@ fn setDefault(self: *Self) !void {
     // Normal Actions
     try self.normal_actions.put(Key{ .code = .{ .Char = '/' } }, .search);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'i' } }, .insert);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'a' } }, .insert_after);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'A' } }, .insert_at_eol);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'O' } }, .insert_newline_above);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'o' } }, .insert_newline_below);
     try self.normal_actions.put(Key{ .code = .{ .Char = ':' } }, .to_cmd);
@@ -74,8 +87,12 @@ fn setDefault(self: *Self) !void {
     try self.normal_actions.put(Key{ .code = .{ .Char = 'K' }, .alt = true }, .add_cur_up);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'J' }, .alt = true }, .add_cur_down);
     try self.normal_actions.put(Key{ .code = .{ .Backspace = {} } }, .backspace);
+    try self.normal_actions.put(Key{ .code = .{ .Delete = {} } }, .delete);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'x' } }, .delete);
     try self.normal_actions.put(Key{ .code = .{ .Home = {} } }, .home);
+    try self.normal_actions.put(Key{ .code = .{ .Char = '0' } }, .home);
     try self.normal_actions.put(Key{ .code = .{ .End = {} } }, .end);
+    try self.normal_actions.put(Key{ .code = .{ .Char = '$' } }, .end);
     try self.normal_actions.put(Key{ .code = .{ .Enter = {} } }, .enter);
 
     // Edit Actions
