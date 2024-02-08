@@ -4,6 +4,8 @@ const util = @import("./util.zig");
 const Cursor = util.Cursor;
 const Size = util.Size;
 const Rect = util.Rect;
+const Key = util.Key;
+const KeyCode = util.KeyCode;
 const WindowImpl = @import("./WindowImpl.zig");
 
 const log = @import("./log.zig");
@@ -12,7 +14,7 @@ const logger = &log.logger;
 const Self = @This();
 
 arena: std.heap.ArenaAllocator,
-name: []const u8,
+name: ?[]const u8 = null,
 lines: std.ArrayListUnmanaged(?std.ArrayListUnmanaged(u8)) = undefined,
 cur_scroll: usize = 0,
 cursors: std.ArrayListUnmanaged(Cursor) = undefined,

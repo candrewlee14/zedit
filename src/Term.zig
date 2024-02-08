@@ -8,6 +8,7 @@ const util = @import("./util.zig");
 const Position = util.Position;
 const Size = util.Size;
 const Key = util.Key;
+const KeyCode = util.KeyCode;
 
 const Terminal = @This();
 
@@ -154,10 +155,18 @@ pub fn readKey(self: *Terminal) !Key {
         },
         127 => return .{ .code = .{ .Backspace = {} } },
         10, '\r' => return .{ .code = .{ .Enter = {} } },
-        else => return .{
-            .code = .{ .Char = byte },
-            .ctrl = std.ascii.isControl(byte),
-            .alt = isAltKey(byte),
+        else => {
+            const ctrl = std.ascii.isControl(byte);
+            const alt = isAltKey(byte);
+            var new_byte = byte;
+            if (ctrl) new_byte = new_byte | 0x60;
+            // TODO: need to handle alt?
+            if (alt) new_byte = new_byte;
+            return .{
+                .code = .{ .Char = new_byte },
+                .ctrl = std.ascii.isControl(byte),
+                .alt = isAltKey(byte),
+            };
         },
     }
 }

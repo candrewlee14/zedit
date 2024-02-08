@@ -8,11 +8,36 @@ pub const Position = struct {
     y: usize,
 };
 
+pub const Mode = enum {
+    normal,
+    select,
+    edit,
+    command,
+
+    pub fn to3Char(self: Mode) []const u8 {
+        return switch (self) {
+            .normal => "NOR",
+            .select => "SEL",
+            .edit => "EDT",
+            .command => "CMD",
+        };
+    }
+};
+
 pub const Key = struct {
     code: KeyCode,
     ctrl: bool = false,
     shift: bool = false,
     alt: bool = false,
+
+    pub fn eql(self: Key, other: Key) bool {
+        // zig fmt: off
+        return self.code == other.code 
+            and self.ctrl == other.ctrl 
+            and self.shift == other.shift 
+            and self.alt == other.alt;
+        // zig fmt: on
+    }
 };
 
 pub const KeyCode = union(enum) {

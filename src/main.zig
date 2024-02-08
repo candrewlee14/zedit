@@ -1,9 +1,14 @@
 const std = @import("std");
 const Terminal = @import("./Term.zig");
+
 const util = @import("./util.zig");
 const Rect = util.Rect;
 const Size = util.Size;
 const Cursor = util.Cursor;
+const Key = util.Key;
+const Mode = util.Mode;
+
+const Config = @import("./Config.zig");
 
 const FileBuf = @import("./FileBuf.zig");
 const WindowImpl = @import("./WindowImpl.zig");
@@ -20,6 +25,30 @@ pub fn assertTty() void {
 
 const Action = union(enum) {};
 
+const Statusline = struct {
+    const Self = @This();
+
+    arena: std.heap.ArenaAllocator,
+    window: WindowImpl = undefined,
+
+    pub fn init(self: *Statusline) !void {
+        const alloc = self.arena.allocator();
+        const vtable = try alloc.create(WindowImpl.VTable);
+        vtable.* = .{ .render = Self.render };
+        self.window = .{ .ptr = @ptrCast(self), .vtable = vtable };
+    }
+    pub fn deinit(self: *Self) void {
+        self.arena.deinit();
+    }
+    fn render(ctx: *anyopaque, term: *Terminal, rect: Rect) anyerror!void {
+        const self: *Self = @alignCast(@ptrCast(ctx));
+        const ed = @fieldParentPtr(Editor, "statusline", self);
+        try term.navCurTo(.{ .x = rect.origin.x, .y = rect.origin.y });
+        const sw = term.cout.writer();
+        try sw.writeAll(ed.mode.to3Char());
+    }
+};
+
 const Tabline = struct {
     arena: std.heap.ArenaAllocator,
     window: WindowImpl = undefined,
@@ -34,17 +63,16 @@ const Tabline = struct {
         self.arena.deinit();
     }
     fn render(ctx: *anyopaque, term: *Terminal, rect: Rect) anyerror!void {
-        _ = term;
         const self: *Tabline = @alignCast(@ptrCast(ctx));
         const ed = @fieldParentPtr(Editor, "tabline", self);
         var i: usize = 0;
         const count = ed.file_bufs.count();
-        const sw = ed.term.cout.writer();
+        const sw = term.cout.writer();
         var x: usize = 0;
-        try ed.term.navCurTo(.{ .x = rect.origin.x, .y = rect.origin.y });
+        try term.navCurTo(.{ .x = rect.origin.x, .y = rect.origin.y });
         while (i < count) : (i += 1) {
             const file_buf = ed.file_bufs.at(i);
-            const name = file_buf.name;
+            const name = file_buf.name orelse "untitled";
             try sw.writeAll(" ");
             if (x + name.len < rect.size.width) {
                 if (i == ed.focused_file_buf) {
@@ -69,7 +97,11 @@ const Editor = struct {
     action_queue: std.fifo.LinearFifo(Action, .{ .Static = 4096 }),
     window: WindowImpl = undefined,
 
+    mode: Mode = .normal,
+    config: Config = undefined,
+
     tabline: Tabline = undefined,
+    statusline: Statusline = undefined,
 
     children_win_cache: std.ArrayListUnmanaged(*const WindowImpl) = undefined,
     focused_file_buf: usize = 0,
@@ -82,6 +114,8 @@ const Editor = struct {
         try self.term.enableRawMode();
         try self.term.clear();
         try self.term.cout.flush();
+
+        try self.config.init(alloc);
 
         self.children_win_cache = try std.ArrayListUnmanaged(*const WindowImpl).initCapacity(alloc, 8);
         self.file_bufs = std.SegmentedList(FileBuf, 8){};
@@ -109,8 +143,14 @@ const Editor = struct {
         try self.tabline.init();
         try self.children_win_cache.append(alloc, &self.tabline.window);
 
+        // set up statusline
+        self.statusline = .{ .arena = std.heap.ArenaAllocator.init(alloc) };
+        try self.statusline.init();
+        // TODO: uncomment
+        try self.children_win_cache.append(alloc, &self.statusline.window);
+
         // set up global logger window
-        try self.children_win_cache.append(alloc, &(logger.window));
+        try self.children_win_cache.append(alloc, &logger.window);
 
         // set up window with full size
         const size = try self.term.getSize();
@@ -119,10 +159,7 @@ const Editor = struct {
         self.window = .{
             .ptr = @ptrCast(self),
             .vtable = vtable,
-            .rect = Rect{
-                .origin = .{ .x = 0, .y = 0 },
-                .size = size,
-            },
+            .rect = Rect{ .origin = .{ .x = 0, .y = 0 }, .size = size },
         };
     }
 
@@ -141,6 +178,7 @@ const Editor = struct {
         const self: *Editor = @alignCast(@ptrCast(ctx));
         return self.children_win_cache.items;
     }
+
     fn layoutChildren(ctx: *anyopaque) anyerror!void {
         const self: *Editor = @alignCast(@ptrCast(ctx));
         const count = self.file_bufs.count();
@@ -163,13 +201,82 @@ const Editor = struct {
                 },
             };
         }
-        self.tabline.window.rect.size.width = self.window.rect.size.width;
-        // put this on the right side
+        self.tabline.window.rect.size = .{
+            .width = self.window.rect.size.width,
+            .height = 1,
+        };
+        // put logger on the right side
         const logger_width = 30;
         logger.window.rect = .{
             .origin = .{ .x = self.window.rect.size.width - logger_width, .y = 0 },
             .size = .{ .width = logger_width, .height = self.window.rect.size.height },
         };
+
+        self.statusline.window.rect = .{
+            .origin = .{ .x = 0, .y = self.window.rect.size.height - 1 },
+            .size = .{ .width = self.window.rect.size.width, .height = 1 },
+        };
+    }
+
+    /// Returns
+    pub fn handleKey(self: *Editor, key: Key) !bool {
+        const fb = self.file_bufs.at(self.focused_file_buf);
+        switch (self.mode) {
+            .normal => {
+                if (self.config.normal_actions.get(key)) |action| switch (action) {
+                    .insert => self.mode = .edit,
+                    .quit => return true,
+                    else => logger.log("{any}", .{action}),
+                    // handle non-configured actions
+                } else switch (key.code) {
+                    .Char => |byte| {
+                        if (key.ctrl) logger.log("CTRL+{c} ({d})", .{ byte, byte });
+                    },
+                    else => logger.log("{any}", .{key.code}),
+                }
+            },
+            .edit => {
+                if (self.config.edit_actions.get(key)) |action| switch (action) {
+                    .to_normal => self.mode = .normal,
+                    // else => logger.log("{any}", .{action}),
+                    // handle non-configured actions
+                } else switch (key.code) {
+                    .Char => |byte| {
+                        if (key.ctrl) {
+                            const new_byte = byte | 0x60;
+                            if (new_byte == 'q' or new_byte == 'Q') return true;
+                            logger.log("CTRL+{c} ({d})", .{ new_byte, new_byte });
+                        } else if (key.alt) {
+                            // TODO: move these to actions
+                            if (byte == 'J') {
+                                try fb.addCursors(1);
+                            } else if (byte == 'K') {
+                                try fb.addCursors(-1);
+                            } else {
+                                logger.log("ALT+{c} ({d})", .{ byte, byte });
+                            }
+                        } else {
+                            try fb.insertText(&.{byte});
+                        }
+                    },
+                    .End => try fb.endline(),
+                    .Backspace => try fb.backspace(),
+                    .Enter => try fb.moveNewline(),
+                    .Home => try fb.homeline(),
+                    .Arrow => |dir| switch (dir) {
+                        .up => try fb.moveCursors(-1, 0),
+                        .down => try fb.moveCursors(1, 0),
+                        .left => try fb.moveCursors(0, -1),
+                        .right => try fb.moveCursors(0, 1),
+                    },
+                    else => {
+                        logger.log("{any}", .{key.code});
+                    },
+                }
+            },
+            else => @panic("Unimplemented mode"),
+        }
+        return false;
     }
 };
 
@@ -198,7 +305,6 @@ pub fn main() !void {
 
     while (true) {
         const size = try ed.term.getSize();
-        const fb = ed.file_bufs.at(ed.focused_file_buf);
         ed.window.rect = Rect{
             .origin = .{ .x = 0, .y = 0 },
             .size = size,
@@ -207,38 +313,7 @@ pub fn main() !void {
         try ed.window.render(&ed.term);
         try ed.term.cout.flush();
         const key = try ed.term.readKey();
-        switch (key.code) {
-            .Char => |byte| {
-                if (key.ctrl) {
-                    const new_byte = byte | 0x60;
-                    if (new_byte == 'q' or new_byte == 'Q') break;
-                    logger.log("CTRL+{c} ({d})", .{ new_byte, new_byte });
-                } else if (key.alt) {
-                    if (byte == 'J') {
-                        try fb.addCursors(1);
-                    } else if (byte == 'K') {
-                        try fb.addCursors(-1);
-                    } else {
-                        logger.log("ALT+{c} ({d})", .{ byte, byte });
-                    }
-                } else {
-                    try fb.insertText(&.{byte});
-                }
-            },
-            .End => try fb.endline(),
-            .Backspace => try fb.backspace(),
-            .Enter => try fb.moveNewline(),
-            .Home => try fb.homeline(),
-            .Arrow => |dir| switch (dir) {
-                .up => try fb.moveCursors(-1, 0),
-                .down => try fb.moveCursors(1, 0),
-                .left => try fb.moveCursors(0, -1),
-                .right => try fb.moveCursors(0, 1),
-            },
-            else => {
-                logger.log("{any}", .{key.code});
-            },
-        }
+        if (try ed.handleKey(key)) break;
     }
 }
 
