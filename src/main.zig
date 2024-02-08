@@ -218,13 +218,25 @@ const Editor = struct {
         };
     }
 
-    /// Returns
+    /// Returns if we should quit
     pub fn handleKey(self: *Editor, key: Key) !bool {
-        const fb = self.file_bufs.at(self.focused_file_buf);
+        const fb: *FileBuf = self.file_bufs.at(self.focused_file_buf);
         switch (self.mode) {
             .normal => {
                 if (self.config.normal_actions.get(key)) |action| switch (action) {
                     .insert => self.mode = .edit,
+                    .move_up => try fb.moveCursors(-1, 0),
+                    .move_down => try fb.moveCursors(1, 0),
+                    .move_left => try fb.moveCursors(0, -1),
+                    .move_right => try fb.moveCursors(0, 1),
+                    .enter => {
+                        try fb.moveCursors(1, 0);
+                        try fb.homeline();
+                    },
+                    .add_cur_up => try fb.addCursors(-1),
+                    .add_cur_down => try fb.addCursors(1),
+                    .home => try fb.homeline(),
+                    .end => try fb.endline(),
                     .quit => return true,
                     else => logger.log("{any}", .{action}),
                     // handle non-configured actions
@@ -238,40 +250,24 @@ const Editor = struct {
             .edit => {
                 if (self.config.edit_actions.get(key)) |action| switch (action) {
                     .to_normal => self.mode = .normal,
+                    .move_up => try fb.moveCursors(-1, 0),
+                    .move_down => try fb.moveCursors(1, 0),
+                    .move_left => try fb.moveCursors(0, -1),
+                    .move_right => try fb.moveCursors(0, 1),
+                    .enter => try fb.addNewline(),
+                    .add_cur_up => try fb.addCursors(-1),
+                    .add_cur_down => try fb.addCursors(1),
+                    .backspace => try fb.backspace(),
+                    .home => try fb.homeline(),
+                    .end => try fb.endline(),
+                    .quit => return true,
                     // else => logger.log("{any}", .{action}),
                     // handle non-configured actions
                 } else switch (key.code) {
                     .Char => |byte| {
-                        if (key.ctrl) {
-                            const new_byte = byte | 0x60;
-                            if (new_byte == 'q' or new_byte == 'Q') return true;
-                            logger.log("CTRL+{c} ({d})", .{ new_byte, new_byte });
-                        } else if (key.alt) {
-                            // TODO: move these to actions
-                            if (byte == 'J') {
-                                try fb.addCursors(1);
-                            } else if (byte == 'K') {
-                                try fb.addCursors(-1);
-                            } else {
-                                logger.log("ALT+{c} ({d})", .{ byte, byte });
-                            }
-                        } else {
-                            try fb.insertText(&.{byte});
-                        }
+                        try fb.insertText(&.{byte});
                     },
-                    .End => try fb.endline(),
-                    .Backspace => try fb.backspace(),
-                    .Enter => try fb.moveNewline(),
-                    .Home => try fb.homeline(),
-                    .Arrow => |dir| switch (dir) {
-                        .up => try fb.moveCursors(-1, 0),
-                        .down => try fb.moveCursors(1, 0),
-                        .left => try fb.moveCursors(0, -1),
-                        .right => try fb.moveCursors(0, 1),
-                    },
-                    else => {
-                        logger.log("{any}", .{key.code});
-                    },
+                    else => logger.log("{any}", .{key.code}),
                 }
             },
             else => @panic("Unimplemented mode"),

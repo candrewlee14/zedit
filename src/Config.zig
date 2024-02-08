@@ -11,13 +11,34 @@ const NormalAction = enum {
     insert_newline_above,
     insert_newline_below,
     to_cmd,
-    down_line,
-    up_line,
+
+    move_down,
+    move_up,
+    move_left,
+    move_right,
+    add_cur_up,
+    add_cur_down,
+    backspace,
+    home,
+    end,
+    enter,
     quit,
 };
 
 const EditAction = enum {
     to_normal,
+
+    move_down,
+    move_up,
+    move_left,
+    move_right,
+    add_cur_up,
+    add_cur_down,
+    backspace,
+    home,
+    end,
+    enter,
+    quit,
 };
 
 normal_actions: std.AutoHashMap(Key, NormalAction) = undefined,
@@ -41,12 +62,35 @@ fn setDefault(self: *Self) !void {
     try self.normal_actions.put(Key{ .code = .{ .Char = 'O' } }, .insert_newline_below);
     try self.normal_actions.put(Key{ .code = .{ .Char = ':' } }, .to_cmd);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'q' }, .ctrl = true }, .quit);
-    try self.normal_actions.put(Key{ .code = .{ .Arrow = .down } }, .down_line);
-    try self.normal_actions.put(Key{ .code = .{ .Char = 'j' } }, .down_line);
-    try self.normal_actions.put(Key{ .code = .{ .Arrow = .up } }, .up_line);
-    try self.normal_actions.put(Key{ .code = .{ .Char = 'k' } }, .up_line);
+
+    try self.normal_actions.put(Key{ .code = .{ .Arrow = .down } }, .move_down);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'j' } }, .move_down);
+    try self.normal_actions.put(Key{ .code = .{ .Arrow = .up } }, .move_up);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'k' } }, .move_up);
+    try self.normal_actions.put(Key{ .code = .{ .Arrow = .left } }, .move_left);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'h' } }, .move_left);
+    try self.normal_actions.put(Key{ .code = .{ .Arrow = .right } }, .move_right);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'l' } }, .move_right);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'K' }, .alt = true }, .add_cur_up);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'J' }, .alt = true }, .add_cur_down);
+    try self.normal_actions.put(Key{ .code = .{ .Backspace = {} } }, .backspace);
+    try self.normal_actions.put(Key{ .code = .{ .Home = {} } }, .home);
+    try self.normal_actions.put(Key{ .code = .{ .End = {} } }, .end);
+    try self.normal_actions.put(Key{ .code = .{ .Enter = {} } }, .enter);
+
     // Edit Actions
     try self.edit_actions.put(Key{ .code = .{ .Escape = {} } }, .to_normal);
+
+    try self.edit_actions.put(Key{ .code = .{ .Arrow = .down } }, .move_down);
+    try self.edit_actions.put(Key{ .code = .{ .Arrow = .up } }, .move_up);
+    try self.edit_actions.put(Key{ .code = .{ .Arrow = .left } }, .move_left);
+    try self.edit_actions.put(Key{ .code = .{ .Arrow = .right } }, .move_right);
+    try self.edit_actions.put(Key{ .code = .{ .Backspace = {} } }, .backspace);
+    try self.edit_actions.put(Key{ .code = .{ .Char = 'K' }, .alt = true }, .add_cur_up);
+    try self.edit_actions.put(Key{ .code = .{ .Char = 'J' }, .alt = true }, .add_cur_down);
+    try self.edit_actions.put(Key{ .code = .{ .Home = {} } }, .home);
+    try self.edit_actions.put(Key{ .code = .{ .End = {} } }, .end);
+    try self.edit_actions.put(Key{ .code = .{ .Enter = {} } }, .enter);
 }
 
 // normal: struct {

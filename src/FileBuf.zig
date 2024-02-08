@@ -89,7 +89,6 @@ fn render(ctx: *anyopaque, term: *Terminal, rect: Rect) anyerror!void {
         }
         try sw.writeAll("\x1b[0m");
     }
-    try self.printCursorInfo(term);
 }
 
 pub fn insertText(self: *Self, text: []const u8) !void {
@@ -208,16 +207,6 @@ pub fn addCursors(self: *Self, dline: isize) !void {
     std.mem.sortUnstable(Cursor, self.cursors.items, {}, Cursor.lessThan);
 }
 
-pub fn printCursorInfo(self: *Self, term: *Terminal) !void {
-    const size = self.window.rect.size;
-    for (self.cursors.items, 0..) |cursor, i| {
-        const sw = term.cout.writer();
-        // goto right side top of screen
-        try sw.print("\x1b[{d};{d}H", .{ i + 1, size.width - 10 });
-        try sw.print("({d}, {d}) ", .{ cursor.line, cursor.col });
-    }
-}
-
 pub fn insertLine(self: *Self, idx: usize, new_line: std.ArrayListUnmanaged(u8)) !void {
     const alloc = self.arena.allocator();
     try self.lines.insert(alloc, idx, new_line);
@@ -238,7 +227,7 @@ pub fn removeLine(self: *Self, idx: usize) !void {
     }
 }
 
-pub fn moveNewline(self: *Self) !void {
+pub fn addNewline(self: *Self) !void {
     const alloc = self.arena.allocator();
     const size = self.window.rect.size;
     // assume all cursors are sorted top to bottom
