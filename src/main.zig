@@ -233,6 +233,14 @@ const Editor = struct {
                         try fb.moveCursors(1, 0);
                         try fb.homeline();
                     },
+                    .insert_newline_above => {
+                        try fb.createNewLine(0);
+                        self.mode = .edit;
+                    },
+                    .insert_newline_below => {
+                        try fb.createNewLine(1);
+                        self.mode = .edit;
+                    },
                     .add_cur_up => try fb.addCursors(-1),
                     .add_cur_down => try fb.addCursors(1),
                     .home => try fb.homeline(),

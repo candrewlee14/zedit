@@ -58,8 +58,8 @@ fn setDefault(self: *Self) !void {
     // Normal Actions
     try self.normal_actions.put(Key{ .code = .{ .Char = '/' } }, .search);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'i' } }, .insert);
+    try self.normal_actions.put(Key{ .code = .{ .Char = 'O' } }, .insert_newline_above);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'o' } }, .insert_newline_below);
-    try self.normal_actions.put(Key{ .code = .{ .Char = 'O' } }, .insert_newline_below);
     try self.normal_actions.put(Key{ .code = .{ .Char = ':' } }, .to_cmd);
     try self.normal_actions.put(Key{ .code = .{ .Char = 'q' }, .ctrl = true }, .quit);
 

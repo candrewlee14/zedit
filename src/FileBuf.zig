@@ -217,6 +217,20 @@ pub fn insertLine(self: *Self, idx: usize, new_line: std.ArrayListUnmanaged(u8))
     }
 }
 
+/// Create a new line above or below every cursor
+pub fn createNewLine(self: *Self, dy: isize) !void {
+    std.debug.assert(dy == 1 or dy == -1 or dy == 0);
+    for (self.cursors.items) |*cursor| {
+        var new_line_i = @as(isize, @intCast(cursor.line)) + dy;
+        new_line_i = @max(new_line_i, 0);
+        new_line_i = @min(new_line_i, @as(isize, @intCast(self.lines.items.len)));
+        const new_line_idx: usize = @intCast(new_line_i);
+        try self.insertLine(new_line_idx, try std.ArrayListUnmanaged(u8).initCapacity(self.arena.allocator(), 64));
+        cursor.line = new_line_idx;
+        cursor.col = 0;
+    }
+}
+
 pub fn removeLine(self: *Self, idx: usize) !void {
     _ = self.lines.orderedRemove(idx);
     for (self.cursors.items) |*cursor| {
