@@ -9,6 +9,7 @@ const Key = util.Key;
 const Mode = util.Mode;
 
 const Config = @import("./Config.zig");
+const ActionMap = Config.ActionMap;
 
 const FileBuf = @import("./FileBuf.zig");
 const WindowImpl = @import("./WindowImpl.zig");
@@ -93,15 +94,18 @@ const Tabline = struct {
 
 const Editor = struct {
     arena: std.heap.ArenaAllocator,
+    config: Config,
     term: Terminal,
     action_queue: std.fifo.LinearFifo(Action, .{ .Static = 4096 }),
     window: WindowImpl = undefined,
 
     mode: Mode = .normal,
-    config: Config = undefined,
 
     tabline: Tabline = undefined,
     statusline: Statusline = undefined,
+
+    cur_normal_action: *ActionMap(Config.NormalAction) = undefined,
+    cur_edit_action: *ActionMap(Config.EditAction) = undefined,
 
     children_win_cache: std.ArrayListUnmanaged(*const WindowImpl) = undefined,
     focused_file_buf: usize = 0,
@@ -115,7 +119,10 @@ const Editor = struct {
         try self.term.clear();
         try self.term.cout.flush();
 
-        try self.config.init(alloc);
+        self.config.arena = std.heap.ArenaAllocator.init(alloc);
+        try self.config.init();
+        self.cur_normal_action = &self.config.normal_actions;
+        self.cur_edit_action = &self.config.edit_actions;
 
         self.children_win_cache = try std.ArrayListUnmanaged(*const WindowImpl).initCapacity(alloc, 8);
         self.file_bufs = std.SegmentedList(FileBuf, 8){};
@@ -223,44 +230,49 @@ const Editor = struct {
         const fb: *FileBuf = self.file_bufs.at(self.focused_file_buf);
         switch (self.mode) {
             .normal => {
-                if (self.config.normal_actions.get(key)) |action| switch (action) {
-                    .insert => {
-                        try fb.boundCursor();
-                        self.mode = .edit;
+                const cur_map = &self.cur_normal_action.map;
+                if (cur_map.get(key)) |action_map| switch (action_map.*) {
+                    .map => {
+                        self.cur_normal_action = action_map;
                     },
-                    .insert_after => {
-                        try fb.moveCursors(0, 1);
-                        try fb.boundCursor();
-                        self.mode = .edit;
+                    .action => |action| switch (action) {
+                        .insert => {
+                            try fb.boundCursor();
+                            self.mode = .edit;
+                        },
+                        .insert_after => {
+                            try fb.moveCursors(0, 1);
+                            try fb.boundCursor();
+                            self.mode = .edit;
+                        },
+                        .insert_at_eol => {
+                            try fb.endline();
+                            self.mode = .edit;
+                        },
+                        .move_up => try fb.moveCursors(-1, 0),
+                        .move_down => try fb.moveCursors(1, 0),
+                        .move_left => try fb.moveCursors(0, -1),
+                        .move_right => try fb.moveCursors(0, 1),
+                        .enter => try fb.normalEnter(),
+                        .insert_newline_above => {
+                            try fb.createNewLine(0);
+                            self.mode = .edit;
+                        },
+                        .insert_newline_below => {
+                            try fb.createNewLine(1);
+                            self.mode = .edit;
+                        },
+                        .delete => {
+                            try fb.moveCursors(0, 1);
+                            try fb.backspace();
+                        },
+                        .add_cur_up => try fb.addCursors(-1),
+                        .add_cur_down => try fb.addCursors(1),
+                        .home => try fb.homeline(),
+                        .end => try fb.endline(),
+                        .quit => return true,
+                        else => logger.log("{any}", .{action}),
                     },
-                    .insert_at_eol => {
-                        try fb.endline();
-                        self.mode = .edit;
-                    },
-                    .move_up => try fb.moveCursors(-1, 0),
-                    .move_down => try fb.moveCursors(1, 0),
-                    .move_left => try fb.moveCursors(0, -1),
-                    .move_right => try fb.moveCursors(0, 1),
-                    .enter => try fb.normalEnter(),
-                    .insert_newline_above => {
-                        try fb.createNewLine(0);
-                        self.mode = .edit;
-                    },
-                    .insert_newline_below => {
-                        try fb.createNewLine(1);
-                        self.mode = .edit;
-                    },
-                    .delete => {
-                        try fb.moveCursors(0, 1);
-                        try fb.backspace();
-                    },
-                    .add_cur_up => try fb.addCursors(-1),
-                    .add_cur_down => try fb.addCursors(1),
-                    .home => try fb.homeline(),
-                    .end => try fb.endline(),
-                    .quit => return true,
-                    else => logger.log("{any}", .{action}),
-                    // handle non-configured actions
                 } else switch (key.code) {
                     .Char => |byte| {
                         if (key.ctrl) logger.log("CTRL+{c} ({d})", .{ byte, byte });
@@ -269,25 +281,29 @@ const Editor = struct {
                 }
             },
             .edit => {
-                if (self.config.edit_actions.get(key)) |action| switch (action) {
-                    .to_normal => self.mode = .normal,
-                    .move_up => try fb.moveCursors(-1, 0),
-                    .move_down => try fb.moveCursors(1, 0),
-                    .move_left => try fb.moveCursors(0, -1),
-                    .move_right => try fb.moveCursors(0, 1),
-                    .enter => try fb.addNewline(),
-                    .add_cur_up => try fb.addCursors(-1),
-                    .add_cur_down => try fb.addCursors(1),
-                    .backspace => try fb.backspace(),
-                    .home => try fb.homeline(),
-                    .end => try fb.endline(),
-                    .delete => {
-                        try fb.moveCursors(0, 1);
-                        try fb.backspace();
+                const cur_map = &self.cur_edit_action.map;
+                if (cur_map.get(key)) |action_map| switch (action_map.*) {
+                    .map => {
+                        self.cur_edit_action = action_map;
                     },
-                    .quit => return true,
-                    // else => logger.log("{any}", .{action}),
-                    // handle non-configured actions
+                    .action => |action| switch (action) {
+                        .to_normal => self.mode = .normal,
+                        .move_up => try fb.moveCursors(-1, 0),
+                        .move_down => try fb.moveCursors(1, 0),
+                        .move_left => try fb.moveCursors(0, -1),
+                        .move_right => try fb.moveCursors(0, 1),
+                        .enter => try fb.addNewline(),
+                        .add_cur_up => try fb.addCursors(-1),
+                        .add_cur_down => try fb.addCursors(1),
+                        .backspace => try fb.backspace(),
+                        .home => try fb.homeline(),
+                        .end => try fb.endline(),
+                        .delete => {
+                            try fb.moveCursors(0, 1);
+                            try fb.backspace();
+                        },
+                        .quit => return true,
+                    },
                 } else switch (key.code) {
                     .Char => |byte| {
                         try fb.insertText(&.{byte});
@@ -315,6 +331,9 @@ pub fn main() !void {
 
     var ed: Editor = .{
         .arena = std.heap.ArenaAllocator.init(alloc),
+        .config = Config{
+            .arena = undefined,
+        },
         .term = .{
             .cout = std.io.bufferedWriter(std.io.getStdOut().writer()),
             .cin = std.io.bufferedReader(std.io.getStdIn().reader()),
