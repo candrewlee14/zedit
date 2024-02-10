@@ -47,6 +47,13 @@ const Statusline = struct {
         try term.navCurTo(.{ .x = rect.origin.x, .y = rect.origin.y });
         const sw = term.cout.writer();
         try sw.writeAll(ed.mode.to3Char());
+        try sw.writeAll(" ");
+        for (ed.action_key_buf.items) |key| {
+            switch (key.code) {
+                .Char => |ch| try sw.writeByte(ch),
+                else => {},
+            }
+        }
     }
 };
 
@@ -104,6 +111,7 @@ const Editor = struct {
     tabline: Tabline = undefined,
     statusline: Statusline = undefined,
 
+    action_key_buf: std.ArrayListUnmanaged(Key) = undefined,
     cur_normal_action: *ActionMap(Config.NormalAction) = undefined,
     cur_edit_action: *ActionMap(Config.EditAction) = undefined,
 
@@ -118,6 +126,8 @@ const Editor = struct {
         try self.term.enableRawMode();
         try self.term.clear();
         try self.term.cout.flush();
+
+        self.action_key_buf = try std.ArrayListUnmanaged(Key).initCapacity(alloc, 128);
 
         self.config.arena = std.heap.ArenaAllocator.init(alloc);
         try self.config.init();
@@ -225,54 +235,90 @@ const Editor = struct {
         };
     }
 
+    fn actionBufStartsWithDigit(self: *const Editor) bool {
+        if (self.action_key_buf.items.len == 0) {
+            return false;
+        }
+        return switch (self.action_key_buf.items[0].code) {
+            .Char => |ch| std.ascii.isDigit(ch),
+            else => false,
+        };
+    }
+
     /// Returns if we should quit
     pub fn handleKey(self: *Editor, key: Key) !bool {
+        const alloc = self.arena.allocator();
         const fb: *FileBuf = self.file_bufs.at(self.focused_file_buf);
         switch (self.mode) {
             .normal => {
                 const cur_map = &self.cur_normal_action.map;
-                if (cur_map.get(key)) |action_map| switch (action_map.*) {
-                    .map => {
-                        self.cur_normal_action = action_map;
-                    },
-                    .action => |action| switch (action) {
-                        .insert => {
-                            try fb.boundCursor();
-                            self.mode = .edit;
+                var override = false;
+                if (cur_map.get(key)) |action_map| {
+                    switch (action_map.*) {
+                        .map => {
+                            self.cur_normal_action = action_map;
+                            try self.action_key_buf.append(alloc, key);
                         },
-                        .insert_after => {
-                            try fb.moveCursors(0, 1);
-                            try fb.boundCursor();
-                            self.mode = .edit;
+                        .action => |action| switch (action) {
+                            .insert => {
+                                try fb.boundCursor();
+                                self.mode = .edit;
+                            },
+                            .insert_after => {
+                                try fb.moveCursors(0, 1);
+                                try fb.boundCursor();
+                                self.mode = .edit;
+                            },
+                            .insert_at_eol => {
+                                try fb.endline();
+                                self.mode = .edit;
+                            },
+                            .move_up => try fb.moveCursors(-1, 0),
+                            .move_down => try fb.moveCursors(1, 0),
+                            .move_left => try fb.moveCursors(0, -1),
+                            .move_right => try fb.moveCursors(0, 1),
+                            .enter => try fb.normalEnter(),
+                            .insert_newline_above => {
+                                try fb.createNewLine(0);
+                                self.mode = .edit;
+                            },
+                            .insert_newline_below => {
+                                try fb.createNewLine(1);
+                                self.mode = .edit;
+                            },
+                            .delete => {
+                                try fb.moveCursors(0, 1);
+                                try fb.backspace();
+                            },
+                            .add_cur_up => try fb.addCursors(-1),
+                            .add_cur_down => try fb.addCursors(1),
+                            .home => try fb.homeline(),
+                            .end => try fb.endline(),
+                            .zero => {
+                                if (self.actionBufStartsWithDigit()) {
+                                    // we override here because 0 after a digit is a count, not the home action
+                                    override = true;
+                                } else {
+                                    try fb.homeline();
+                                }
+                            },
+                            .quit => return true,
+                            else => logger.log("{any}", .{action}),
                         },
-                        .insert_at_eol => {
-                            try fb.endline();
-                            self.mode = .edit;
+                    }
+                    switch (action_map.*) {
+                        .map => {},
+                        .action => {
+                            if (override) {
+                                try self.action_key_buf.append(alloc, key);
+                            } else {
+                                // reset action to base config
+                                self.cur_normal_action = &self.config.normal_actions;
+                                // clear action key buffer
+                                self.action_key_buf.clearAndFree(alloc);
+                            }
                         },
-                        .move_up => try fb.moveCursors(-1, 0),
-                        .move_down => try fb.moveCursors(1, 0),
-                        .move_left => try fb.moveCursors(0, -1),
-                        .move_right => try fb.moveCursors(0, 1),
-                        .enter => try fb.normalEnter(),
-                        .insert_newline_above => {
-                            try fb.createNewLine(0);
-                            self.mode = .edit;
-                        },
-                        .insert_newline_below => {
-                            try fb.createNewLine(1);
-                            self.mode = .edit;
-                        },
-                        .delete => {
-                            try fb.moveCursors(0, 1);
-                            try fb.backspace();
-                        },
-                        .add_cur_up => try fb.addCursors(-1),
-                        .add_cur_down => try fb.addCursors(1),
-                        .home => try fb.homeline(),
-                        .end => try fb.endline(),
-                        .quit => return true,
-                        else => logger.log("{any}", .{action}),
-                    },
+                    }
                 } else switch (key.code) {
                     .Char => |byte| {
                         if (key.ctrl) logger.log("CTRL+{c} ({d})", .{ byte, byte });

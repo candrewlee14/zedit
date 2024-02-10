@@ -16,6 +16,7 @@ pub const NormalAction = enum(ActionInt) {
     insert_newline_above,
     insert_newline_below,
     to_cmd,
+    zero,
 
     move_down,
     move_up,
@@ -104,9 +105,9 @@ pub fn putAction(self: *Self, comptime mode: Mode, key: Key, action: anytype) !v
 
 fn setDefaults(self: *Self) !void {
     const alloc = self.arena.allocator();
-    for (0..10) |n| {
-        // 0-9 route back to any normal actions
-        // we'll need to handle the numbers somewhere and parse them
+    for (1..10) |n| {
+        // 1-9 route back to any normal actions
+        // 0 is handled separately since you can't start the cmd with 0
         const char = @as(u8, @intCast(n)) + '0';
         try self.normal_actions.map.put(alloc, Key{ .code = .{ .Char = char } }, &self.normal_actions);
     }
@@ -135,7 +136,7 @@ fn setDefaults(self: *Self) !void {
     try self.putAction(.normal, Key{ .code = .{ .Delete = {} } }, .delete);
     try self.putAction(.normal, Key{ .code = .{ .Char = 'x' } }, .delete);
     try self.putAction(.normal, Key{ .code = .{ .Home = {} } }, .home);
-    try self.putAction(.normal, Key{ .code = .{ .Char = '0' } }, .home);
+    try self.putAction(.normal, Key{ .code = .{ .Char = '0' } }, .zero);
     try self.putAction(.normal, Key{ .code = .{ .End = {} } }, .end);
     try self.putAction(.normal, Key{ .code = .{ .Char = '$' } }, .end);
     try self.putAction(.normal, Key{ .code = .{ .Enter = {} } }, .enter);
